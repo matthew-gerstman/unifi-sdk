@@ -345,3 +345,126 @@ MIT
 ## Author
 
 Matthew Gerstman
+
+## IP Address Organization (Zero Overhead)
+
+### Automatic Device Classification & IP Assignment
+
+The SDK can automatically organize your devices into logical IP ranges using DHCP reservations - **zero performance overhead**.
+
+#### Why This Approach
+
+- **Maximum Performance:** All devices on same subnet = Layer 2 switching = line rate (10Gbps)
+- **Zero Overhead:** DHCP reservations have no runtime cost
+- **Easy Management:** Organized IPs make troubleshooting simple
+- **Flexible:** Can add VLANs later if you want security isolation
+
+#### IP Scheme
+
+| Range | Category | Example Devices |
+|-------|----------|-----------------|
+| 10.0.0.1-50 | Infrastructure | Router, switches, APs |
+| 10.0.0.51-100 | Servers | NAS, Plex, servers |
+| 10.0.0.101-150 | Computers | Desktops, workstations |
+| 10.0.0.151-200 | Laptops & Tablets | MacBooks, iPads |
+| 10.0.0.201-250 | Phones | iPhones, Android |
+| 10.0.1.1-100 | Media | Apple TV, Roku, consoles |
+| 10.0.2.1-100 | IoT - Trusted | Hue, Nest, Ecobee |
+| 10.0.3.1-100 | IoT - Untrusted | Cheap IoT devices |
+| 10.0.4.1-100 | Cameras | Security cameras, doorbells |
+| 10.0.5.1-254 | Guest | Visitor devices |
+| 10.0.10.0-20.254 | DHCP Pool | Unclassified devices |
+
+#### Usage
+
+**Preview organization:**
+```bash
+npm run organize -- --dry-run
+```
+
+**Apply DHCP reservations:**
+```bash
+npm run organize
+```
+
+**What it does:**
+1. Scans all connected clients
+2. Classifies by hostname pattern (iPhone → Phones, Apple-TV → Media, etc.)
+3. Assigns IP in appropriate range
+4. Creates DHCP reservation (device always gets this IP)
+5. Generates detailed report
+
+#### Classification Rules
+
+The SDK auto-detects device types:
+
+- **Infrastructure:** hostname contains "switch", "ap-", "udm"
+- **Servers:** "nas", "server", "plex", "homeassistant"
+- **Computers:** "desktop", "pc-", "imac", "workstation"
+- **Laptops:** "macbook", "laptop", "surface"
+- **Phones:** "iphone", "android", "phone"
+- **Media:** "appletv", "roku", "tv", "sonos", "playstation", "xbox"
+- **IoT Trusted:** "hue", "nest", "ecobee", "homekit"
+- **Cameras:** "camera", "doorbell", "nvr"
+
+Devices that don't match get flagged for manual classification.
+
+#### Performance Impact
+
+**Zero.** Seriously.
+
+- DHCP reservations = same DHCP protocol
+- All devices on same subnet = Layer 2 switching
+- Hardware-accelerated switching in UDM Pro SE
+- 10Gbps line rate between any devices
+- <1ms latency
+
+#### Manual Classification
+
+For unclassified devices, edit the plan and re-run:
+
+```bash
+# Review unclassified devices
+cat ip-organization-plan.md
+
+# Add custom rules in src/local/ip-organization.ts
+# Then re-run
+npm run organize
+```
+
+## Performance vs Security Trade-offs
+
+### Option 1: Flat Network (Maximum Speed) ⚡
+
+**What you get:**
+- 10Gbps wired throughput
+- <1ms latency
+- Zero routing overhead
+- Organized by IP ranges
+
+**What you sacrifice:**
+- No network isolation
+- IoT can theoretically access everything
+- Security depends on device-level controls
+
+**Recommended for:** Home networks prioritizing speed over security
+
+### Option 2: VLAN Segmentation (Balanced) 🔒
+
+**What you get:**
+- Network isolation (IoT can't reach computers)
+- Firewall rules between segments
+- Contained breach radius
+- Still 9+ Gbps throughput
+
+**What you sacrifice:**
+- ~5-10% overhead for cross-VLAN traffic
+- Slightly more complex management
+- Need firewall rules for device communication
+
+**Recommended for:** Home networks with untrusted IoT devices
+
+### Recommendation
+
+**Start with Option 1 (flat + organized IPs).** You can add VLANs later if needed. The performance difference is negligible for home use, but flat is simpler and faster.
+

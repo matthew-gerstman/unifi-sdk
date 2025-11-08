@@ -1,7 +1,7 @@
 {
   "name": "@mattgerstman/unifi-sdk",
   "version": "1.0.0",
-  "description": "Comprehensive TypeScript SDK for UniFi network management - Cloud API + Local Controller API",
+  "description": "Comprehensive TypeScript SDK for UniFi network management",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
@@ -10,7 +10,9 @@
     "dev": "tsx src/cli.ts",
     "monitor": "tsx src/cli.ts monitor",
     "optimize": "tsx src/cli.ts optimize",
-    "apply": "tsx src/cli.ts apply"
+    "apply": "tsx src/cli.ts apply",
+    "organize": "tsx src/cli.ts organize",
+    "test": "tsx src/cli.ts test"
   },
   "keywords": ["unifi", "udm", "network", "automation", "typescript"],
   "author": "Matthew Gerstman",
