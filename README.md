@@ -468,3 +468,89 @@ npm run organize
 
 **Start with Option 1 (flat + organized IPs).** You can add VLANs later if needed. The performance difference is negligible for home use, but flat is simpler and faster.
 
+
+---
+
+## Enhanced Device Metadata
+
+The organize command now captures **all available metadata** for comprehensive device analysis:
+
+### Output Files
+
+**`ip-organization.json`** - Complete structured data including:
+- All device metadata (OS, device type, manufacturer, etc.)
+- Connection details (AP/switch, port, signal strength)
+- Performance metrics (speeds, quality scores, satisfaction)
+- Usage statistics (data transferred, uptime, first seen)
+- Classification suggestions with reasoning
+
+**`ip-organization.md`** - Human-readable report with:
+- Organized devices grouped by category
+- Complete details for each device
+- Unclassified devices with identification hints
+- Suggested classifications based on all available metadata
+
+### Metadata Included
+
+For every device (classified or unclassified):
+
+**Identity:**
+- Name, hostname, MAC address
+- Operating system (iOS, macOS, Android, Windows, Linux)
+- Device type (UniFi's detection: "iPhone 15 Pro", "MacBook Air")
+- Manufacturer (from MAC OUI lookup)
+
+**Connection:**
+- Wired vs WiFi
+- Parent device (which AP or switch)
+- Switch port number (for wired devices)
+- WiFi network name (SSID)
+- WiFi signal strength and quality rating
+- WiFi channel and radio type (2.4/5/6 GHz)
+- WiFi protocol (WiFi 6E, WiFi 6, WiFi 5, WiFi 4)
+
+**Performance:**
+- Link speeds (upload/download Mbps)
+- Connection satisfaction score (0-100)
+- Signal-to-noise ratio
+- Packet retry rates
+
+**Usage:**
+- Total data transferred (GB)
+- Upload/download breakdown
+- Packet counts
+- Current uptime
+- First seen date (when device first connected)
+- Last seen timestamp
+
+**Status:**
+- Guest network status
+- Blocked status
+- Existing DHCP reservation
+- Anomaly detection count
+
+### Example Unclassified Device Entry
+
+```markdown
+### 1. ac-controller-living-room
+
+| Property | Value |
+|----------|-------|
+| **MAC** | `80:7d:3a:01:6f:a2` |
+| **Hostname** | ac-controller-living-room |
+| **Current IP** | 10.5.56.67 |
+| **Manufacturer** | Ecobee |
+| **💡 Likely Identity** | **Ecobee smart thermostat** |
+| **Connection** | WiFi via Living Room AP (HomeNetwork-5G) |
+| **Signal** | -42 dBm (Excellent) |
+| **WiFi** | WiFi 5 |
+| **Data Usage** | 0.15 GB total |
+| **Uptime** | 15d 8h |
+| **First Connected** | 7/15/2025, 3:22:14 PM |
+| **Quality Score** | 98/100 (Excellent) |
+
+💡 **Suggested Classification:** IoT - Smart Home (10.0.2.x) - Thermostat in living room
+```
+
+This makes identification trivial - you can see it's an Ecobee thermostat based on manufacturer, low bandwidth usage, excellent WiFi signal (stationary), and the hostname.
+

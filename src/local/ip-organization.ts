@@ -1,5 +1,6 @@
 import { UniFiLocalAPI } from './client.js';
 import { LocalClient, LocalDevice } from '../types/index.js';
+import { writeFileSync } from 'fs';
 
 export interface IPScheme {
   name: string;
@@ -49,19 +50,19 @@ export const PERFORMANCE_OPTIMIZED_SCHEME: IPScheme[] = [
     name: 'IoT - Smart Home',
     range: '10.0.2.1 - 10.0.2.100',
     description: 'Smart home automation devices',
-    devices: ['Hue', 'Ecobee', 'Nest', 'HomeKit', 'AC controllers', 'Smart plugs'],
+    devices: ['Hue', 'Ecobee', 'Nest', 'HomeKit', 'AC controllers'],
   },
   {
     name: 'IoT - Appliances',
     range: '10.0.3.1 - 10.0.3.100',
     description: 'Smart appliances',
-    devices: ['Smart washers', 'Smart dryers', 'Smart fridges', 'Sleep Number'],
+    devices: ['Smart washers', 'Smart dryers', 'Sleep Number'],
   },
   {
     name: 'Security & Cameras',
     range: '10.0.4.1 - 10.0.4.100',
     description: 'Security equipment',
-    devices: ['Ring cameras', 'Ring doorbells', 'Security cameras', 'MyQ garage'],
+    devices: ['Ring cameras', 'Ring doorbells', 'MyQ garage'],
   },
   {
     name: 'Guest Devices',
@@ -69,22 +70,89 @@ export const PERFORMANCE_OPTIMIZED_SCHEME: IPScheme[] = [
     description: 'Visitor devices',
     devices: ['Guest phones', 'Guest laptops'],
   },
-  {
-    name: 'DHCP Pool',
-    range: '10.0.10.1 - 10.0.20.254',
-    description: 'Auto-assigned for new/temporary devices',
-    devices: ['Unknown devices', 'New devices before classification'],
-  },
 ];
 
-interface DeviceInfo {
-  client: LocalClient;
-  classification: { type: string; priority: number } | null;
+export interface EnhancedDeviceInfo {
+  // Core Identity
+  mac: string;
+  name: string;
+  hostname: string;
+  currentIp: string;
   assignedIp?: string;
-  parentDevice?: string;
+  
+  // Classification
+  classification: string | null;
+  classificationPriority: number;
+  likelyIdentity: string;
+  manufacturer: string;
+  
+  // Connection Details
   connectionType: 'Wired' | 'WiFi';
+  parentDevice: string;
+  parentDeviceName: string;
+  switchPort?: number;
+  wifiNetwork?: string;
+  
+  // WiFi Metrics (if wireless)
   signalStrength?: number;
-  likelyIdentity?: string;
+  signalQuality?: string;
+  noiseFloor?: number;
+  channel?: number;
+  radioType?: string;
+  wifiProtocol?: string;
+  wifiGeneration?: string;
+  
+  // Device Capabilities
+  osName?: string;
+  osClass?: number;
+  deviceType?: string;
+  deviceFamily?: number;
+  vendorId?: number;
+  
+  // Performance Metrics
+  txRate?: number;
+  rxRate?: number;
+  satisfaction?: number;
+  satisfactionQuality?: string;
+  
+  // Usage Statistics
+  txBytes: number;
+  rxBytes: number;
+  totalDataGB: number;
+  txPackets: number;
+  rxPackets: number;
+  
+  // Timing
+  uptime: number;
+  uptimeFormatted: string;
+  lastSeen: number;
+  firstSeen?: number;
+  firstSeenDate?: string;
+  
+  // Status
+  isGuest: boolean;
+  isBlocked: boolean;
+  hasFixedIP: boolean;
+  anomalies: number;
+}
+
+export interface OrganizationReport {
+  metadata: {
+    generated: string;
+    totalDevices: number;
+    autoClassified: number;
+    needsReview: number;
+    network: string;
+  };
+  organized: {
+    [category: string]: EnhancedDeviceInfo[];
+  };
+  unclassified: EnhancedDeviceInfo[];
+  summary: {
+    byCategory: { [category: string]: number };
+    byConnectionType: { wired: number; wifi: number };
+    byManufacturer: { [manufacturer: string]: number };
+  };
 }
 
 export class IPOrganizer {
@@ -103,238 +171,203 @@ export class IPOrganizer {
     return this.devices;
   }
 
-  async createDHCPReservation(
-    mac: string,
-    ip: string,
-    hostname?: string
-  ): Promise<void> {
-    await (this.api as any).request(
-      `/proxy/network/api/s/default/rest/user/${mac}`,
-      {
-        method: 'PUT',
-        body: JSON.stringify({
-          fixed_ip: ip,
-          name: hostname,
-          use_fixedip: true,
-        }),
-      }
-    );
+  private getWifiGeneration(proto?: string): string {
+    if (!proto) return 'Unknown';
+    if (proto.includes('ax')) return 'WiFi 6/6E';
+    if (proto.includes('ac')) return 'WiFi 5';
+    if (proto.includes('n')) return 'WiFi 4';
+    if (proto.includes('g')) return 'WiFi 3';
+    return proto;
   }
 
-  private identifyUnknownDevice(client: LocalClient): string {
+  private getSignalQuality(signal?: number): string {
+    if (!signal) return 'Unknown';
+    if (signal > -50) return 'Excellent';
+    if (signal > -60) return 'Good';
+    if (signal > -70) return 'Fair';
+    return 'Weak';
+  }
+
+  private getSatisfactionQuality(score?: number): string {
+    if (!score) return 'Unknown';
+    if (score >= 90) return 'Excellent';
+    if (score >= 75) return 'Good';
+    if (score >= 60) return 'Fair';
+    return 'Poor';
+  }
+
+  private formatUptime(seconds: number): string {
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    
+    if (days > 0) return `${days}d ${hours}h`;
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    return `${minutes}m`;
+  }
+
+  private getParentDevice(client: LocalClient, devices: LocalDevice[]): { name: string; device: string } {
+    if (client.is_wired) {
+      // Find switch by MAC
+      const connectedSwitch = devices.find(d => d.mac === (client as any).sw_mac);
+      
+      if (connectedSwitch) {
+        const port = (client as any).sw_port;
+        const portInfo = port ? ` port ${port}` : '';
+        return {
+          name: connectedSwitch.name || connectedSwitch.model,
+          device: `${connectedSwitch.name || connectedSwitch.model}${portInfo}`,
+        };
+      }
+      return { name: 'Unknown Switch', device: 'Wired (switch unknown)' };
+    } else {
+      // Find AP by MAC
+      const ap = devices.find(d => d.mac === (client as any).ap_mac);
+      const essid = (client as any).essid || 'Unknown SSID';
+      
+      if (ap) {
+        return {
+          name: ap.name || ap.model,
+          device: `${ap.name || ap.model} (${essid})`,
+        };
+      }
+      return { name: 'Unknown AP', device: `WiFi (${essid})` };
+    }
+  }
+
+  private lookupManufacturer(mac: string): string {
+    const prefix = mac.substring(0, 8).toLowerCase();
+    
+    const manufacturers: Record<string, string> = {
+      '5c:47:5e': 'Xiaomi',
+      'ac:9f:c3': 'Ring (Amazon)',
+      '04:99:b9': 'Eight Sleep',
+      '18:b4:30': 'Google Nest',
+      '1c:39:29': 'LG Electronics',
+      'b0:09:da': 'TP-Link',
+      '80:7d:3a': 'Ecobee',
+      '0c:95:05': 'Chamberlain (MyQ)',
+      'd8:bf:c0': 'Ecobee',
+      'ac:bc:b5': 'Ecobee',
+      'e0:2b:96': 'Ecobee',
+      'd4:90:9c': 'Ecobee',
+      'c4:29:96': 'Philips (Hue)',
+      'c8:dd:6a': 'LG Electronics',
+      '64:db:a0': 'Sleep Number',
+      '20:f8:3b': 'Raspberry Pi',
+      '70:a7:41': 'Ubiquiti',
+      '5a:6c:0b': 'Private MAC',
+      '56:de:ac': 'Apple (Private)',
+      'b2:c1:dd': 'Apple (Private)',
+      'cc:6a:10': 'Generic IoT',
+      '00:11:32': 'Synology',
+      '90:09:d0': 'Sonos',
+    };
+
+    return manufacturers[prefix] || 'Unknown';
+  }
+
+  private identifyUnknownDevice(client: LocalClient, parent: string): string {
     const mac = client.mac.toLowerCase();
     const name = (client.name || client.hostname || '').toLowerCase();
+    const osName = (client as any).os_name || '';
+    const deviceName = (client as any).device_name || '';
 
-    // OUI (MAC prefix) based identification
-    const ouiDatabase: Record<string, string> = {
-      '5c:47:5e': 'Possibly Xiaomi/Mi device (smart home)',
-      'ac:9f:c3': 'Ring device (camera/doorbell)',
-      '04:99:b9': 'Eight Sleep Pod (sleep tracker)',
-      '18:b4:30': 'Nest device (thermostat/camera)',
-      '1c:39:29': 'LG Electronics (appliance)',
-      '5a:6c:0b': 'Randomized MAC (privacy-enabled device)',
-      'b0:09:da': 'TP-Link device (smart plug/switch)',
-      '80:7d:3a': 'Ecobee thermostat',
-      '0c:95:05': 'Chamberlain/MyQ (garage door)',
-      'cc:6a:10': 'Generic IoT device',
-      'd8:bf:c0': 'Ecobee thermostat',
-      'ac:bc:b5': 'Ecobee thermostat',
-      'e0:2b:96': 'Ecobee thermostat',
-      'd4:90:9c': 'Ecobee thermostat',
-      'c4:29:96': 'Philips Hue device',
-      'c8:dd:6a': 'LG Electronics (appliance)',
-      '64:db:a0': 'Sleep Number bed',
-      '20:f8:3b': 'Raspberry Pi (likely Home Assistant)',
-      '56:de:ac': 'Randomized MAC (Apple device in private mode)',
-      'b2:c1:dd': 'Randomized MAC (likely Apple Watch)',
-    };
-
-    // Check OUI database
-    const prefix = mac.substring(0, 8);
-    if (ouiDatabase[prefix]) {
-      return ouiDatabase[prefix];
+    // OS-based identification (most reliable)
+    if (osName) {
+      if (osName.includes('iOS')) {
+        if (deviceName.includes('iPad')) return 'iPad (iOS tablet)';
+        if (deviceName.includes('iPhone')) return `${deviceName} (smartphone)`;
+        return 'iOS device (iPhone or iPad)';
+      }
+      if (osName.includes('macOS')) {
+        if (deviceName.includes('MacBook')) return `${deviceName} (laptop)`;
+        if (deviceName.includes('iMac')) return `${deviceName} (desktop)`;
+        return 'Mac computer';
+      }
+      if (osName.includes('Android')) {
+        return deviceName || 'Android smartphone or tablet';
+      }
+      if (osName.includes('Windows')) {
+        return 'Windows PC';
+      }
+      if (osName.includes('Linux')) {
+        return 'Linux device (server, Raspberry Pi, or IoT)';
+      }
     }
 
-    // Pattern-based identification
-    if (name.includes('ring')) return 'Ring security device';
-    if (name.includes('ac-controller')) return 'Ecobee or similar smart thermostat';
-    if (name.includes('bedroom') || name.includes('office') || name.includes('garage')) {
-      return 'Room-based smart home controller (likely Ecobee)';
+    // UniFi device name detection
+    if (deviceName) {
+      return deviceName;
     }
-    if (name.includes('lg_smart')) return 'LG smart appliance';
-    if (name.includes('sleep')) return 'Sleep tracking device';
-    if (name.includes('myq')) return 'MyQ garage door opener';
-    if (name.includes('lwip')) return 'Embedded device with lightweight IP stack';
-    if (name.includes('pillow')) return 'Sleep tracking sensor (Eight Sleep or similar)';
 
-    // Connection type hints
+    // MAC-based identification
+    const manufacturer = this.lookupManufacturer(mac);
+    if (manufacturer !== 'Unknown') {
+      const hints: Record<string, string> = {
+        'Ring (Amazon)': 'Ring security camera or doorbell',
+        'Eight Sleep': 'Eight Sleep Pod (mattress tracker)',
+        'Google Nest': 'Nest thermostat or camera',
+        'LG Electronics': 'LG smart appliance (check laundry room, kitchen)',
+        'TP-Link': 'TP-Link smart plug or switch',
+        'Ecobee': 'Ecobee smart thermostat',
+        'Chamberlain (MyQ)': 'MyQ garage door opener',
+        'Philips (Hue)': 'Philips Hue bridge or light',
+        'Sleep Number': 'Sleep Number smart bed',
+        'Raspberry Pi': 'Raspberry Pi (check if running Home Assistant, Pi-hole)',
+        'Sonos': 'Sonos speaker',
+      };
+      return hints[manufacturer] || `${manufacturer} device`;
+    }
+
+    // Usage pattern hints
+    const totalGB = ((client.tx_bytes || 0) + (client.rx_bytes || 0)) / (1024**3);
+    if (totalGB > 50) return 'High bandwidth device (computer, NAS, or streaming device)';
+    if (totalGB < 0.1) return 'Low bandwidth device (sensor, smart plug, or rarely used)';
+
+    // Uptime hints
+    if (client.uptime && client.uptime > 86400 * 30) {
+      return 'Always-on device (server, infrastructure, or appliance)';
+    }
+
+    // Connection hints
     if (client.is_wired) {
-      return 'Wired device - likely stationary (computer, TV, appliance, or infrastructure)';
-    } else {
-      if (client.signal && client.signal > -50) {
-        return 'Strong WiFi signal - likely stationary device near AP';
-      } else if (client.signal && client.signal < -70) {
-        return 'Weak WiFi signal - may need better placement or is mobile';
+      return `Wired device on ${parent} (computer, TV, appliance, or infrastructure)`;
+    }
+
+    // WiFi signal hints
+    if ((client as any).signal) {
+      const signal = (client as any).signal;
+      if (signal > -50) {
+        return 'Strong WiFi signal - stationary device near AP (smart home hub, TV, appliance)';
       }
     }
 
-    return 'Unknown - review MAC prefix and connection details';
-  }
-
-  private getParentDevice(client: LocalClient, devices: LocalDevice[]): string {
-    if (client.is_wired) {
-      // Find the switch this device is connected to
-      const connectedSwitch = devices.find(d => {
-        // Check if this device has port information showing this MAC
-        return d.port_table?.some(port => 
-          port.up && (port as any).mac === client.mac
-        );
-      });
-
-      if (connectedSwitch) {
-        return `${connectedSwitch.name || connectedSwitch.model} (wired)`;
-      }
-      return 'Wired (switch unknown)';
-    } else {
-      // Find the AP this device is connected to
-      const essid = client.essid || 'Unknown SSID';
-      const ap = devices.find(d => 
-        d.type === 'uap' && d.name && client.ap_mac === d.mac
-      );
-
-      if (ap) {
-        return `${ap.name} (${essid})`;
-      }
-      return `WiFi (${essid})`;
-    }
-  }
-
-  async organizeDevicesByType(
-    clients: LocalClient[],
-    dryRun: boolean = true
-  ): Promise<{
-    organized: Array<{ 
-      mac: string; 
-      currentIp: string; 
-      assignedIp: string; 
-      type: string;
-      name: string;
-      parentDevice: string;
-      connectionType: string;
-      signalStrength?: number;
-    }>;
-    unclassified: Array<{
-      client: LocalClient;
-      parentDevice: string;
-      likelyIdentity: string;
-      connectionType: string;
-      signalStrength?: number;
-    }>;
-  }> {
-    const organized: Array<{
-      mac: string;
-      currentIp: string;
-      assignedIp: string;
-      type: string;
-      name: string;
-      parentDevice: string;
-      connectionType: string;
-      signalStrength?: number;
-    }> = [];
-    
-    const unclassified: Array<{
-      client: LocalClient;
-      parentDevice: string;
-      likelyIdentity: string;
-      connectionType: string;
-      signalStrength?: number;
-    }> = [];
-
-    // Get all devices for parent lookup
-    const devices = await this.getCurrentDevices();
-
-    // IP counters for each category
-    const ipCounters: Record<string, number> = {
-      'Infrastructure': 1,
-      'Servers': 51,
-      'Computers': 101,
-      'Laptops & Tablets': 151,
-      'Phones & Watches': 201,
-      'Media Devices': 1,
-      'IoT - Smart Home': 1,
-      'IoT - Appliances': 1,
-      'Security & Cameras': 1,
-    };
-
-    for (const client of clients) {
-      const classification = this.classifyDevice(client);
-      const parentDevice = this.getParentDevice(client, devices);
-      const connectionType = client.is_wired ? 'Wired' : 'WiFi';
-
-      if (classification) {
-        const { type } = classification;
-        let assignedIp: string;
-
-        switch (type) {
-          case 'Infrastructure':
-          case 'Servers':
-          case 'Computers':
-          case 'Laptops & Tablets':
-          case 'Phones & Watches':
-            assignedIp = `10.0.0.${ipCounters[type]++}`;
-            break;
-          case 'Media Devices':
-            assignedIp = `10.0.1.${ipCounters[type]++}`;
-            break;
-          case 'IoT - Smart Home':
-            assignedIp = `10.0.2.${ipCounters[type]++}`;
-            break;
-          case 'IoT - Appliances':
-            assignedIp = `10.0.3.${ipCounters[type]++}`;
-            break;
-          case 'Security & Cameras':
-            assignedIp = `10.0.4.${ipCounters[type]++}`;
-            break;
-          default:
-            continue;
-        }
-
-        organized.push({
-          mac: client.mac,
-          currentIp: client.ip,
-          assignedIp,
-          type,
-          name: client.name || client.hostname || 'Unnamed Device',
-          parentDevice,
-          connectionType,
-          signalStrength: client.signal,
-        });
-
-        if (!dryRun) {
-          console.log(`[APPLY] ${client.name || client.hostname}: ${assignedIp}`);
-          await this.createDHCPReservation(
-            client.mac,
-            assignedIp,
-            client.name || client.hostname
-          );
-        }
-      } else {
-        unclassified.push({
-          client,
-          parentDevice,
-          likelyIdentity: this.identifyUnknownDevice(client),
-          connectionType,
-          signalStrength: client.signal,
-        });
-      }
-    }
-
-    return { organized, unclassified };
+    return 'Unknown - check physical location and manufacturer';
   }
 
   private classifyDevice(client: LocalClient): { type: string; priority: number } | null {
     const name = (client.name || client.hostname || '').toLowerCase();
     const mac = client.mac.toLowerCase();
+    const osName = ((client as any).os_name || '').toLowerCase();
+    const deviceName = ((client as any).device_name || '').toLowerCase();
+
+    // OS-based classification (highest priority when available)
+    if (osName.includes('ios')) {
+      if (deviceName.includes('ipad')) {
+        return { type: 'Laptops & Tablets', priority: 95 };
+      }
+      return { type: 'Phones & Watches', priority: 95 };
+    }
+    if (osName.includes('macos')) {
+      if (deviceName.includes('macbook')) {
+        return { type: 'Laptops & Tablets', priority: 95 };
+      }
+      return { type: 'Computers', priority: 95 };
+    }
+    if (osName.includes('android')) {
+      return { type: 'Phones & Watches', priority: 95 };
+    }
 
     // Infrastructure (Priority 100)
     if (
@@ -391,7 +424,7 @@ export class IPOrganizer {
       name.includes('android') ||
       name.includes('watch') ||
       name.includes('pillow') ||
-      mac.startsWith('b2:c1:dd') || // Randomized MAC (likely Apple Watch)
+      mac.startsWith('b2:c1:dd') ||
       mac.startsWith('04:99:b9') // Eight Sleep
     ) {
       return { type: 'Phones & Watches', priority: 70 };
@@ -407,7 +440,8 @@ export class IPOrganizer {
       name.includes('playstation') ||
       name.includes('xbox') ||
       name.includes('chromecast') ||
-      name.includes('shield')
+      name.includes('shield') ||
+      mac.startsWith('90:09:d0') // Sonos
     ) {
       return { type: 'Media Devices', priority: 65 };
     }
@@ -420,8 +454,8 @@ export class IPOrganizer {
       name.includes('nvr') ||
       name.includes('myq') ||
       name.includes('spotlight') ||
-      mac.startsWith('ac:9f:c3') || // Ring devices
-      mac.startsWith('0c:95:05') // MyQ
+      mac.startsWith('ac:9f:c3') ||
+      mac.startsWith('0c:95:05')
     ) {
       return { type: 'Security & Cameras', priority: 85 };
     }
@@ -443,7 +477,8 @@ export class IPOrganizer {
       mac.startsWith('e0:2b:96') ||
       mac.startsWith('d4:90:9c') ||
       mac.startsWith('ac:bc:b5') ||
-      mac.startsWith('c4:29:96') // Philips Hue
+      mac.startsWith('c4:29:96') ||
+      mac.startsWith('18:b4:30') // Nest
     ) {
       return { type: 'IoT - Smart Home', priority: 60 };
     }
@@ -457,9 +492,9 @@ export class IPOrganizer {
       name.includes('lg_smart') ||
       name.includes('sleep number') ||
       name.includes('sleepnumber') ||
-      mac.startsWith('1c:39:29') || // LG
-      mac.startsWith('c8:dd:6a') || // LG
-      mac.startsWith('64:db:a0') // Sleep Number
+      mac.startsWith('1c:39:29') ||
+      mac.startsWith('c8:dd:6a') ||
+      mac.startsWith('64:db:a0')
     ) {
       return { type: 'IoT - Appliances', priority: 55 };
     }
@@ -478,192 +513,399 @@ export class IPOrganizer {
     return null;
   }
 
-  private identifyUnknownDevice(client: LocalClient): string {
-    const mac = client.mac.toLowerCase();
-    const name = (client.name || client.hostname || '').toLowerCase();
+  private buildEnhancedDeviceInfo(
+    client: LocalClient,
+    devices: LocalDevice[],
+    assignedIp?: string,
+    classification?: string
+  ): EnhancedDeviceInfo {
+    const parent = this.getParentDevice(client, devices);
+    const totalBytes = (client.tx_bytes || 0) + (client.rx_bytes || 0);
+    const totalGB = totalBytes / (1024**3);
+    
+    const clientAny = client as any;
+    
+    return {
+      // Core Identity
+      mac: client.mac,
+      name: client.name || 'Unnamed',
+      hostname: client.hostname || 'Unknown',
+      currentIp: client.ip,
+      assignedIp,
+      
+      // Classification
+      classification,
+      classificationPriority: classification ? 1 : 0,
+      likelyIdentity: this.identifyUnknownDevice(client, parent.device),
+      manufacturer: this.lookupManufacturer(client.mac),
+      
+      // Connection
+      connectionType: client.is_wired ? 'Wired' : 'WiFi',
+      parentDevice: parent.device,
+      parentDeviceName: parent.name,
+      switchPort: clientAny.sw_port,
+      wifiNetwork: clientAny.essid,
+      
+      // WiFi Metrics
+      signalStrength: clientAny.signal,
+      signalQuality: this.getSignalQuality(clientAny.signal),
+      noiseFloor: clientAny.noise,
+      channel: clientAny.channel,
+      radioType: clientAny.radio,
+      wifiProtocol: clientAny.radio_proto,
+      wifiGeneration: this.getWifiGeneration(clientAny.radio_proto),
+      
+      // Device Capabilities
+      osName: clientAny.os_name,
+      osClass: clientAny.os_class,
+      deviceType: clientAny.device_name,
+      deviceFamily: clientAny.dev_family,
+      vendorId: clientAny.dev_vendor,
+      
+      // Performance
+      txRate: clientAny.tx_rate,
+      rxRate: clientAny.rx_rate,
+      satisfaction: clientAny.satisfaction,
+      satisfactionQuality: this.getSatisfactionQuality(clientAny.satisfaction),
+      
+      // Usage
+      txBytes: client.tx_bytes || 0,
+      rxBytes: client.rx_bytes || 0,
+      totalDataGB: parseFloat(totalGB.toFixed(2)),
+      txPackets: client.tx_packets || 0,
+      rxPackets: client.rx_packets || 0,
+      
+      // Timing
+      uptime: client.uptime || 0,
+      uptimeFormatted: this.formatUptime(client.uptime || 0),
+      lastSeen: client.last_seen || 0,
+      firstSeen: clientAny.first_seen,
+      firstSeenDate: clientAny.first_seen 
+        ? new Date(clientAny.first_seen * 1000).toLocaleString()
+        : undefined,
+      
+      // Status
+      isGuest: client.is_guest || false,
+      isBlocked: clientAny.blocked || false,
+      hasFixedIP: clientAny.use_fixedip || false,
+      anomalies: clientAny.anomalies || 0,
+    };
+  }
 
-    const ouiDatabase: Record<string, string> = {
-      '5c:47:5e': 'Xiaomi/Mi smart home device',
-      'ac:9f:c3': 'Ring camera or doorbell',
-      '04:99:b9': 'Eight Sleep Pod (mattress sleep tracker)',
-      '18:b4:30': 'Nest thermostat or camera',
-      '1c:39:29': 'LG smart appliance (washer/dryer/fridge)',
-      '5a:6c:0b': 'Device using MAC randomization (likely iOS/Android)',
-      'b0:09:da': 'TP-Link smart plug or switch',
-      '80:7d:3a': 'Ecobee smart thermostat',
-      '0c:95:05': 'Chamberlain MyQ garage door opener',
-      'cc:6a:10': 'Generic IoT device (check manufacturer)',
-      'd8:bf:c0': 'Ecobee smart thermostat',
-      'ac:bc:b5': 'Ecobee smart thermostat',
-      'e0:2b:96': 'Ecobee smart thermostat',
-      'd4:90:9c': 'Ecobee smart thermostat',
-      'c4:29:96': 'Philips Hue bridge or accessory',
-      'c8:dd:6a': 'LG smart appliance',
-      '64:db:a0': 'Sleep Number smart bed',
-      '20:f8:3b': 'Raspberry Pi (check if running Home Assistant)',
-      '56:de:ac': 'Apple device with private WiFi address enabled',
-      'b2:c1:dd': 'Apple device with private WiFi (likely Watch)',
+  async createDHCPReservation(
+    mac: string,
+    ip: string,
+    hostname?: string
+  ): Promise<void> {
+    await (this.api as any).request(
+      `/proxy/network/api/s/default/rest/user/${mac}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          fixed_ip: ip,
+          name: hostname,
+          use_fixedip: true,
+        }),
+      }
+    );
+  }
+
+  async organizeDevicesByType(
+    clients: LocalClient[],
+    dryRun: boolean = true
+  ): Promise<OrganizationReport> {
+    const devices = await this.getCurrentDevices();
+    
+    const organized: { [category: string]: EnhancedDeviceInfo[] } = {};
+    const unclassified: EnhancedDeviceInfo[] = [];
+
+    // IP counters
+    const ipCounters: Record<string, number> = {
+      'Infrastructure': 1,
+      'Servers': 51,
+      'Computers': 101,
+      'Laptops & Tablets': 151,
+      'Phones & Watches': 201,
+      'Media Devices': 1,
+      'IoT - Smart Home': 1,
+      'IoT - Appliances': 1,
+      'Security & Cameras': 1,
     };
 
-    const prefix = mac.substring(0, 8);
-    if (ouiDatabase[prefix]) {
-      return ouiDatabase[prefix];
+    for (const client of clients) {
+      const classification = this.classifyDevice(client);
+
+      if (classification) {
+        const { type } = classification;
+        let assignedIp: string;
+
+        switch (type) {
+          case 'Infrastructure':
+          case 'Servers':
+          case 'Computers':
+          case 'Laptops & Tablets':
+          case 'Phones & Watches':
+            assignedIp = `10.0.0.${ipCounters[type]++}`;
+            break;
+          case 'Media Devices':
+            assignedIp = `10.0.1.${ipCounters[type]++}`;
+            break;
+          case 'IoT - Smart Home':
+            assignedIp = `10.0.2.${ipCounters[type]++}`;
+            break;
+          case 'IoT - Appliances':
+            assignedIp = `10.0.3.${ipCounters[type]++}`;
+            break;
+          case 'Security & Cameras':
+            assignedIp = `10.0.4.${ipCounters[type]++}`;
+            break;
+          default:
+            continue;
+        }
+
+        const deviceInfo = this.buildEnhancedDeviceInfo(client, devices, assignedIp, type);
+
+        if (!organized[type]) {
+          organized[type] = [];
+        }
+        organized[type].push(deviceInfo);
+
+        if (!dryRun) {
+          console.log(`[APPLY] ${deviceInfo.name}: ${assignedIp}`);
+          await this.createDHCPReservation(
+            client.mac,
+            assignedIp,
+            client.name || client.hostname
+          );
+        }
+      } else {
+        const deviceInfo = this.buildEnhancedDeviceInfo(client, devices);
+        unclassified.push(deviceInfo);
+      }
     }
 
-    // Hostname-based hints
-    if (name) {
-      if (name.match(/^\d+[a-f0-9]+$/)) return 'Device using serial number as hostname';
-      if (name.includes('controller')) return 'Smart home controller or hub';
-      if (name.length < 5) return 'Generic/default hostname - likely IoT device';
-    }
+    // Calculate summary stats
+    const byCategory: { [category: string]: number } = {};
+    Object.entries(organized).forEach(([cat, devs]) => {
+      byCategory[cat] = devs.length;
+    });
 
-    return 'Unknown device - check physical location and recent additions';
+    const allDevices = [...Object.values(organized).flat(), ...unclassified];
+    const byConnectionType = {
+      wired: allDevices.filter(d => d.connectionType === 'Wired').length,
+      wifi: allDevices.filter(d => d.connectionType === 'WiFi').length,
+    };
+
+    const byManufacturer: { [manufacturer: string]: number } = {};
+    allDevices.forEach(d => {
+      byManufacturer[d.manufacturer] = (byManufacturer[d.manufacturer] || 0) + 1;
+    });
+
+    const totalClassified = Object.values(organized).reduce((sum, arr) => sum + arr.length, 0);
+
+    return {
+      metadata: {
+        generated: new Date().toISOString(),
+        totalDevices: clients.length,
+        autoClassified: totalClassified,
+        needsReview: unclassified.length,
+        network: '10.0.0.0/16 (Flat network, maximum performance)',
+      },
+      organized,
+      unclassified,
+      summary: {
+        byCategory,
+        byConnectionType,
+        byManufacturer,
+      },
+    };
   }
 
   async generateOrganizationPlan(
     clients: LocalClient[]
-  ): Promise<string> {
-    const { organized, unclassified } = await this.organizeDevicesByType(clients, true);
+  ): Promise<{ json: OrganizationReport; markdown: string }> {
+    const report = await this.organizeDevicesByType(clients, true);
 
-    let report = '# IP Organization Plan\n\n';
-    report += `**Generated:** ${new Date().toLocaleString()}\n`;
-    report += `**Network:** Syracuse (10.0.0.0/16)\n\n`;
-    report += `---\n\n`;
-    report += `## Summary\n\n`;
-    report += `- **Total Devices:** ${clients.length}\n`;
-    report += `- **Auto-classified:** ${organized.length}\n`;
-    report += `- **Needs Manual Review:** ${unclassified.length}\n\n`;
+    // Save JSON
+    writeFileSync('ip-organization.json', JSON.stringify(report, null, 2));
 
-    // Group by type
-    const byType = organized.reduce((acc, item) => {
-      if (!acc[item.type]) acc[item.type] = [];
-      acc[item.type].push(item);
-      return acc;
-    }, {} as Record<string, typeof organized>);
-
-    report += '---\n\n';
-    report += '## Auto-Classified Devices\n\n';
+    // Generate Markdown
+    let md = '# IP Organization Plan\n\n';
+    md += `**Generated:** ${new Date(report.metadata.generated).toLocaleString()}\n`;
+    md += `**Network:** ${report.metadata.network}\n\n`;
+    md += '---\n\n';
     
-    Object.entries(byType).forEach(([type, devices]) => {
-      report += `### ${type} (${devices.length} devices)\n\n`;
-      report += '| Device Name | MAC Address | Current IP | New IP | Connection | Signal |\n';
-      report += '|-------------|-------------|------------|--------|------------|--------|\n';
+    md += '## Summary\n\n';
+    md += `- **Total Devices:** ${report.metadata.totalDevices}\n`;
+    md += `- **Auto-Classified:** ${report.metadata.autoClassified}\n`;
+    md += `- **Needs Review:** ${report.metadata.needsReview}\n`;
+    md += `- **Wired:** ${report.summary.byConnectionType.wired}\n`;
+    md += `- **WiFi:** ${report.summary.byConnectionType.wifi}\n\n`;
+
+    md += '### Devices by Category\n\n';
+    Object.entries(report.summary.byCategory).forEach(([cat, count]) => {
+      md += `- **${cat}:** ${count}\n`;
+    });
+    md += '\n';
+
+    md += '### Top Manufacturers\n\n';
+    const topManufacturers = Object.entries(report.summary.byManufacturer)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10);
+    topManufacturers.forEach(([mfr, count]) => {
+      md += `- **${mfr}:** ${count} devices\n`;
+    });
+    md += '\n---\n\n';
+
+    // Organized devices
+    md += '## Auto-Classified Devices\n\n';
+    Object.entries(report.organized).forEach(([category, devices]) => {
+      md += `### ${category} (${devices.length} devices)\n\n`;
       
       devices.forEach(d => {
-        const signal = d.signalStrength 
-          ? `${d.signalStrength} dBm` 
-          : (d.connectionType === 'Wired' ? 'N/A' : 'Unknown');
+        md += `#### ${d.name}\n\n`;
+        md += '| Property | Value |\n';
+        md += '|----------|-------|\n';
+        md += `| **MAC** | \`${d.mac}\` |\n`;
+        md += `| **Current IP** | ${d.currentIp} |\n`;
+        md += `| **Assigned IP** | **${d.assignedIp}** |\n`;
+        md += `| **Manufacturer** | ${d.manufacturer} |\n`;
         
-        report += `| ${d.name} | \`${d.mac}\` | ${d.currentIp} | **${d.assignedIp}** | ${d.parentDevice} | ${signal} |\n`;
+        if (d.osName) md += `| **OS** | ${d.osName} |\n`;
+        if (d.deviceType) md += `| **Device Type** | ${d.deviceType} |\n`;
+        
+        md += `| **Connection** | ${d.connectionType} via ${d.parentDevice} |\n`;
+        
+        if (d.switchPort) md += `| **Switch Port** | ${d.switchPort} |\n`;
+        if (d.wifiNetwork) md += `| **WiFi Network** | ${d.wifiNetwork} |\n`;
+        if (d.signalStrength) md += `| **Signal** | ${d.signalStrength} dBm (${d.signalQuality}) |\n`;
+        if (d.wifiGeneration) md += `| **WiFi** | ${d.wifiGeneration} |\n`;
+        
+        md += `| **Data Usage** | ${d.totalDataGB} GB (↑${(d.txBytes / (1024**3)).toFixed(2)} GB ↓${(d.rxBytes / (1024**3)).toFixed(2)} GB) |\n`;
+        md += `| **Uptime** | ${d.uptimeFormatted} |\n`;
+        
+        if (d.firstSeenDate) md += `| **First Seen** | ${d.firstSeenDate} |\n`;
+        if (d.satisfaction) md += `| **Quality** | ${d.satisfaction}/100 (${d.satisfactionQuality}) |\n`;
+        if (d.hasFixedIP) md += `| **Has Reservation** | ✓ Already configured |\n`;
+        
+        md += '\n';
       });
-      report += '\n';
     });
 
-    if (unclassified.length > 0) {
-      report += '---\n\n';
-      report += '## Unclassified Devices - Manual Review Required\n\n';
-      report += `**${unclassified.length} devices need classification**\n\n`;
+    // Unclassified devices
+    if (report.unclassified.length > 0) {
+      md += '---\n\n';
+      md += `## Unclassified Devices (${report.unclassified.length} devices)\n\n`;
+      md += '**These devices need manual classification**\n\n';
       
-      unclassified.forEach((item, idx) => {
-        const c = item.client;
-        const displayName = c.name || c.hostname || 'Unnamed Device';
+      report.unclassified.forEach((d, idx) => {
+        md += `### ${idx + 1}. ${d.name}\n\n`;
+        md += '| Property | Value |\n';
+        md += '|----------|-------|\n';
+        md += `| **MAC** | \`${d.mac}\` |\n`;
+        md += `| **Hostname** | ${d.hostname} |\n`;
+        md += `| **Current IP** | ${d.currentIp} |\n`;
+        md += `| **Manufacturer** | ${d.manufacturer} |\n`;
+        md += `| **💡 Likely Identity** | **${d.likelyIdentity}** |\n`;
         
-        report += `### ${idx + 1}. ${displayName}\n\n`;
-        report += `| Property | Value |\n`;
-        report += `|----------|-------|\n`;
-        report += `| **MAC Address** | \`${c.mac}\` |\n`;
-        report += `| **Current IP** | ${c.ip} |\n`;
-        report += `| **Connection** | ${item.connectionType} via ${item.parentDevice} |\n`;
+        if (d.osName) md += `| **OS** | ${d.osName} |\n`;
+        if (d.deviceType) md += `| **Device Type** | ${d.deviceType} |\n`;
         
-        if (item.signalStrength) {
-          const quality = item.signalStrength > -50 ? 'Excellent' :
-                         item.signalStrength > -60 ? 'Good' :
-                         item.signalStrength > -70 ? 'Fair' : 'Weak';
-          report += `| **WiFi Signal** | ${item.signalStrength} dBm (${quality}) |\n`;
-        }
+        md += `| **Connection** | ${d.connectionType} via ${d.parentDevice} |\n`;
         
-        if (c.essid) {
-          report += `| **WiFi Network** | ${c.essid} |\n`;
-        }
+        if (d.switchPort) md += `| **Switch Port** | Port ${d.switchPort} |\n`;
+        if (d.wifiNetwork) md += `| **WiFi Network** | ${d.wifiNetwork} |\n`;
+        if (d.signalStrength) md += `| **Signal** | ${d.signalStrength} dBm (${d.signalQuality}) |\n`;
+        if (d.wifiGeneration) md += `| **WiFi** | ${d.wifiGeneration} |\n`;
         
-        report += `| **Likely Identity** | ${item.likelyIdentity} |\n`;
-        report += `| **Uptime** | ${Math.floor((c.uptime || 0) / 3600)}h ${Math.floor(((c.uptime || 0) % 3600) / 60)}m |\n`;
+        md += `| **Data Usage** | ${d.totalDataGB} GB total |\n`;
+        md += `| **Uptime** | ${d.uptimeFormatted} |\n`;
         
-        if (c.tx_bytes && c.rx_bytes) {
-          const totalMB = ((c.tx_bytes + c.rx_bytes) / (1024 * 1024)).toFixed(1);
-          report += `| **Data Transferred** | ${totalMB} MB |\n`;
-        }
+        if (d.firstSeenDate) md += `| **First Connected** | ${d.firstSeenDate} |\n`;
+        if (d.satisfaction) md += `| **Quality Score** | ${d.satisfaction}/100 (${d.satisfactionQuality}) |\n`;
+        if (d.txRate && d.rxRate) md += `| **Link Speed** | ↑${d.txRate} Mbps ↓${d.rxRate} Mbps |\n`;
+        if (d.hasFixedIP) md += `| **Has Reservation** | ✓ Yes |\n`;
+        if (d.anomalies > 0) md += `| **⚠️ Anomalies** | ${d.anomalies} detected |\n`;
         
-        report += `| **Manufacturer** | ${this.lookupManufacturer(c.mac)} |\n`;
-        report += '\n';
+        md += '\n';
         
         // Suggest classification
-        const suggestion = this.suggestClassification(displayName, item.likelyIdentity);
-        report += `**💡 Suggested Classification:** ${suggestion}\n\n`;
-        report += '---\n\n';
+        const suggestion = this.suggestDetailedClassification(d);
+        md += `**💡 Suggested Classification:** ${suggestion}\n\n`;
+        md += '---\n\n';
       });
-
-      report += '### How to Classify Unknown Devices\n\n';
-      report += '1. **Check physical location** - walk around and see what devices are near the listed AP/switch\n';
-      report += '2. **Check recent purchases** - new smart home devices?\n';
-      report += '3. **Review uptime** - recently connected = recently added\n';
-      report += '4. **Check data usage** - high usage = streaming/computer, low = sensor\n';
-      report += '5. **WiFi signal strength** - strong = stationary near AP, weak = far away or mobile\n\n';
-      
-      report += 'Once identified, add patterns to `src/local/ip-organization.ts`:\n\n';
-      report += '```typescript\n';
-      report += '// In classifyDevice() method:\n';
-      report += 'if (name.includes(\'your-device-name\') || mac.startsWith(\'aa:bb:cc\')) {\n';
-      report += '  return { type: \'IoT - Smart Home\', priority: 60 };\n';
-      report += '}\n';
-      report += '```\n';
     }
 
-    return report;
+    return { json: report, markdown: md };
   }
 
-  private lookupManufacturer(mac: string): string {
-    const prefix = mac.substring(0, 8).toLowerCase();
+  private suggestDetailedClassification(device: EnhancedDeviceInfo): string {
+    // Use all available metadata for best suggestion
     
-    const manufacturers: Record<string, string> = {
-      '5c:47:5e': 'Xiaomi',
-      'ac:9f:c3': 'Ring (Amazon)',
-      '04:99:b9': 'Eight Sleep',
-      '18:b4:30': 'Google Nest',
-      '1c:39:29': 'LG Electronics',
-      'b0:09:da': 'TP-Link',
-      '80:7d:3a': 'Ecobee',
-      '0c:95:05': 'Chamberlain (MyQ)',
-      'd8:bf:c0': 'Ecobee',
-      'ac:bc:b5': 'Ecobee',
-      'e0:2b:96': 'Ecobee',
-      'd4:90:9c': 'Ecobee',
-      'c4:29:96': 'Philips (Hue)',
-      'c8:dd:6a': 'LG Electronics',
-      '64:db:a0': 'Sleep Number',
-      '20:f8:3b': 'Raspberry Pi Foundation',
-      '70:a7:41': 'Ubiquiti Networks',
-      '5a:6c:0b': 'Locally Administered (Randomized)',
-      '56:de:ac': 'Locally Administered (Apple Private)',
-      'b2:c1:dd': 'Locally Administered (Apple Private)',
-    };
+    if (device.osName) {
+      if (device.osName.includes('iOS')) {
+        if (device.deviceType?.includes('iPad')) {
+          return '**Laptops & Tablets** (10.0.0.151+) - iPad';
+        }
+        return '**Phones & Watches** (10.0.0.201+) - iPhone or Apple Watch';
+      }
+      if (device.osName.includes('macOS')) {
+        return device.deviceType?.includes('MacBook')
+          ? '**Laptops & Tablets** (10.0.0.151+) - MacBook'
+          : '**Computers** (10.0.0.101+) - Mac desktop';
+      }
+      if (device.osName.includes('Android')) {
+        return '**Phones & Watches** (10.0.0.201+) - Android device';
+      }
+    }
 
-    return manufacturers[prefix] || 'Unknown (lookup at macvendors.com)';
-  }
+    // Manufacturer-based
+    if (device.manufacturer.includes('Ring')) {
+      return '**Security & Cameras** (10.0.4.x) - Ring device';
+    }
+    if (device.manufacturer.includes('Ecobee')) {
+      return `**IoT - Smart Home** (10.0.2.x) - Thermostat in ${device.name}`;
+    }
+    if (device.manufacturer.includes('LG') || device.manufacturer.includes('Sleep Number')) {
+      return '**IoT - Appliances** (10.0.3.x) - Smart appliance';
+    }
+    if (device.manufacturer.includes('MyQ')) {
+      return '**Security & Cameras** (10.0.4.x) - Garage door opener';
+    }
+    if (device.manufacturer.includes('Philips')) {
+      return '**IoT - Smart Home** (10.0.2.x) - Hue device';
+    }
+    if (device.manufacturer.includes('Sonos')) {
+      return '**Media Devices** (10.0.1.x) - Sonos speaker';
+    }
+    if (device.manufacturer.includes('Raspberry Pi')) {
+      return '**Servers** (10.0.0.51+) - Raspberry Pi (check if running services)';
+    }
 
-  private suggestClassification(name: string, identity: string): string {
-    const lower = name.toLowerCase();
-    
-    if (identity.includes('Ring')) return '**Security & Cameras** (10.0.4.x)';
-    if (identity.includes('Ecobee') || lower.includes('controller')) return '**IoT - Smart Home** (10.0.2.x)';
-    if (identity.includes('LG') || identity.includes('Sleep Number')) return '**IoT - Appliances** (10.0.3.x)';
-    if (identity.includes('MyQ')) return '**Security & Cameras** (10.0.4.x) - garage door';
-    if (identity.includes('Eight Sleep') || lower.includes('pillow')) return '**Phones & Watches** (10.0.0.201+) - sleep tracker';
-    if (identity.includes('Raspberry Pi')) return '**Servers** (10.0.0.51+) - check if running services';
-    if (identity.includes('Apple') && identity.includes('private')) return '**Phones & Watches** (10.0.0.201+) - iOS device';
-    if (identity.includes('Xiaomi') || identity.includes('TP-Link')) return '**IoT - Smart Home** (10.0.2.x)';
-    if (identity.includes('stationary')) return '**Media Devices** (10.0.1.x) or **IoT - Smart Home** (10.0.2.x)';
-    
-    return 'Review device type and choose appropriate category';
+    // Usage pattern based
+    if (device.totalDataGB > 50 && device.connectionType === 'Wired') {
+      return '**Servers** (10.0.0.51+) or **Computers** (10.0.0.101+) - High bandwidth usage';
+    }
+    if (device.totalDataGB > 10 && device.connectionType === 'WiFi') {
+      return '**Media Devices** (10.0.1.x) or **Computers** (10.0.0.101+) - Streaming or heavy WiFi use';
+    }
+    if (device.totalDataGB < 0.1) {
+      return '**IoT - Smart Home** (10.0.2.x) - Low bandwidth (sensor or controller)';
+    }
+
+    // Uptime based
+    if (device.uptime > 86400 * 30 && device.connectionType === 'Wired') {
+      return '**Infrastructure** (10.0.0.1+) or **Servers** (10.0.0.51+) - Always-on device';
+    }
+
+    // WiFi generation hint
+    if (device.wifiGeneration === 'WiFi 6/6E') {
+      return '**Phones & Watches** (10.0.0.201+) or **Laptops & Tablets** (10.0.0.151+) - Recent device';
+    }
+    if (device.wifiGeneration === 'WiFi 4') {
+      return '**IoT - Smart Home** (10.0.2.x) - Older device, likely IoT';
+    }
+
+    return 'Review all metadata above and choose appropriate category';
   }
 }

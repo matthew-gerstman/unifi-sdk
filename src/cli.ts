@@ -89,7 +89,6 @@ async function organize() {
   
   console.log(dryRun ? '🧪 DRY RUN - IP Organization Preview\n' : '📋 Organizing IP Addresses\n');
 
-  // Need local API for this
   const localApi = (sdk as any).local;
   if (!localApi) {
     console.error('❌ Local API required for IP organization');
@@ -101,55 +100,45 @@ async function organize() {
   const clients = await organizer.getCurrentClients();
 
   console.log(`Found ${clients.length} connected devices\n`);
+  console.log('Analyzing all metadata...\n');
 
-  const { organized, unclassified } = await organizer.organizeDevicesByType(clients, dryRun);
+  // Generate comprehensive report
+  const { json, markdown } = await organizer.generateOrganizationPlan(clients);
 
-  // Group by type for display
-  const byType = organized.reduce((acc, item) => {
-    if (!acc[item.type]) acc[item.type] = [];
-    acc[item.type].push(item);
-    return acc;
-  }, {} as Record<string, typeof organized>);
+  // Save both formats
+  writeFileSync('ip-organization.json', JSON.stringify(json, null, 2));
+  writeFileSync('ip-organization.md', markdown);
 
-  console.log('=== Auto-Classified Devices ===\n');
-  Object.entries(byType).forEach(([type, devices]) => {
-    console.log(`${type}: ${devices.length} devices`);
-    devices.slice(0, 3).forEach(d => {
-      const name = clients.find(c => c.mac === d.mac)?.name || 
-                   clients.find(c => c.mac === d.mac)?.hostname || 
-                   d.mac;
-      console.log(`   ${name}: ${d.currentIp} → ${d.assignedIp}`);
-    });
-    if (devices.length > 3) {
-      console.log(`   ... and ${devices.length - 3} more`);
-    }
-    console.log();
+  console.log('=== Summary ===\n');
+  console.log(`Auto-classified: ${json.metadata.autoClassified} devices`);
+  console.log(`Needs review: ${json.metadata.needsReview} devices\n`);
+
+  console.log('By Category:');
+  Object.entries(json.summary.byCategory).forEach(([cat, count]) => {
+    console.log(`  ${cat}: ${count}`);
   });
+  console.log();
 
-  if (unclassified.length > 0) {
-    console.log('=== Unclassified Devices (Manual Review) ===\n');
-    unclassified.forEach(c => {
-      console.log(`   ${c.name || c.hostname || 'Unknown'} (${c.mac}): ${c.ip}`);
-    });
-    console.log();
+  console.log('By Connection:');
+  console.log(`  Wired: ${json.summary.byConnectionType.wired}`);
+  console.log(`  WiFi: ${json.summary.byConnectionType.wifi}`);
+  console.log();
+
+  if (json.metadata.needsReview > 0) {
+    console.log(`\n⚠️  ${json.metadata.needsReview} devices need manual review`);
+    console.log('   Check ip-organization.md for detailed analysis\n');
   }
 
-  console.log(`\nSummary:`);
-  console.log(`   Auto-classified: ${organized.length}`);
-  console.log(`   Needs review: ${unclassified.length}`);
+  console.log('📄 Files created:');
+  console.log('   • ip-organization.json (complete data)');
+  console.log('   • ip-organization.md (human-readable report)');
 
   if (dryRun) {
     console.log('\n💡 Run without --dry-run to apply DHCP reservations');
   } else {
     console.log('\n✅ DHCP reservations created!');
     console.log('   Devices will get new IPs on next DHCP renewal');
-    console.log('   Or reboot devices to apply immediately');
   }
-
-  // Save plan
-  const plan = await organizer.generateOrganizationPlan(clients);
-  writeFileSync('ip-organization-plan.md', plan);
-  console.log('\n✓ Detailed plan saved to ip-organization-plan.md');
 }
 
 // Main CLI
