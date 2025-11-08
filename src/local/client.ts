@@ -9,6 +9,7 @@ export class UniFiLocalAPI {
   private site: string;
   private cookie?: string;
   private csrfToken?: string;
+  private debug: boolean;
 
   // Disable SSL verification for self-signed certs
   private agent = new https.Agent({ rejectUnauthorized: false });
@@ -19,11 +20,29 @@ export class UniFiLocalAPI {
     password: string;
     site?: string;
     port?: number;
+    debug?: boolean;
   }) {
     this.baseUrl = `https://${config.host}:${config.port || 443}`;
     this.username = config.username;
     this.password = config.password;
     this.site = config.site || 'default';
+    this.debug = config.debug ?? true;
+
+    if (this.debug) {
+      console.log('[DEBUG] UniFi Local API initialized');
+      console.log(`[DEBUG] Base URL: ${this.baseUrl}`);
+      console.log(`[DEBUG] Username: ${this.username}`);
+      console.log(`[DEBUG] Site: ${this.site}`);
+    }
+  }
+
+  private log(message: string, data?: any) {
+    if (this.debug) {
+      console.log(`[DEBUG] ${message}`);
+      if (data) {
+        console.log('[DEBUG]', JSON.stringify(data, null, 2));
+      }
+    }
   }
 
   private async request<T>(
@@ -31,10 +50,12 @@ export class UniFiLocalAPI {
     options?: RequestInit
   ): Promise<T> {
     if (!this.cookie) {
+      this.log('No cookie found, logging in...');
       await this.login();
     }
 
     const url = `${this.baseUrl}${endpoint}`;
+    this.log(`Request: ${options?.method || 'GET'} ${url}`);
     
     const response = await fetch(url, {
       ...options,
@@ -47,51 +68,101 @@ export class UniFiLocalAPI {
       },
     });
 
+    this.log(`Response: ${response.status} ${response.statusText}`);
+
     if (!response.ok) {
       if (response.status === 401) {
-        // Session expired, retry once
+        this.log('Got 401, session expired - retrying login...');
         await this.login();
         return this.request(endpoint, options);
       }
       
       const error = await response.text();
+      this.log('Error response:', error);
       throw new Error(
         `Local API Error [${response.status}]: ${error || response.statusText}`
       );
     }
 
     const data = await response.json() as any;
+    this.log('Response data keys:', Object.keys(data));
     return data;
   }
 
   async login(): Promise<void> {
-    const response = await fetch(`${this.baseUrl}/api/auth/login`, {
-      method: 'POST',
-      agent: this.agent,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username: this.username,
-        password: this.password,
-      }),
-    });
+    this.log('Attempting login...');
+    this.log(`URL: ${this.baseUrl}/api/auth/login`);
+    this.log(`Username: ${this.username}`);
 
-    if (!response.ok) {
-      throw new Error(`Login failed: ${response.status} ${response.statusText}`);
-    }
+    try {
+      const response = await fetch(`${this.baseUrl}/api/auth/login`, {
+        method: 'POST',
+        agent: this.agent,
+        headers: { 
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: JSON.stringify({
+          username: this.username,
+          password: this.password,
+        }),
+      });
 
-    // Extract cookie and CSRF token
-    const cookies = response.headers.get('set-cookie');
-    if (cookies) {
-      this.cookie = cookies.split(';')[0];
-    }
+      this.log(`Login response: ${response.status} ${response.statusText}`);
 
-    const data = await response.json() as any;
-    if (data.data && data.data.csrf_token) {
-      this.csrfToken = data.data.csrf_token;
+      // Log response headers
+      const headers: Record<string, string> = {};
+      response.headers.forEach((value, key) => {
+        headers[key] = value;
+      });
+      this.log('Response headers:', headers);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        this.log('Login error body:', errorText);
+        
+        // Try to parse error
+        try {
+          const errorJson = JSON.parse(errorText);
+          this.log('Parsed error:', errorJson);
+        } catch (e) {
+          // Not JSON, just text error
+        }
+
+        throw new Error(`Login failed: ${response.status} ${response.statusText}\n${errorText}`);
+      }
+
+      // Extract cookie
+      const cookies = response.headers.get('set-cookie');
+      this.log('Set-Cookie header:', cookies);
+      
+      if (cookies) {
+        this.cookie = cookies.split(';')[0];
+        this.log('Extracted cookie:', this.cookie);
+      } else {
+        this.log('WARNING: No set-cookie header received');
+      }
+
+      // Extract CSRF token from response body
+      const data = await response.json() as any;
+      this.log('Login response data:', data);
+
+      if (data.data && data.data.csrf_token) {
+        this.csrfToken = data.data.csrf_token;
+        this.log('CSRF token extracted:', this.csrfToken);
+      } else {
+        this.log('WARNING: No CSRF token in response');
+      }
+
+      this.log('Login successful!');
+    } catch (error) {
+      this.log('Login exception:', error);
+      throw error;
     }
   }
 
   async logout(): Promise<void> {
+    this.log('Logging out...');
     await this.request('/api/auth/logout', { method: 'POST' });
     this.cookie = undefined;
     this.csrfToken = undefined;
@@ -102,20 +173,25 @@ export class UniFiLocalAPI {
   // ============================================================================
 
   async getDevices(): Promise<LocalDevice[]> {
+    this.log('Fetching devices...');
     const data = await this.request<{ data: LocalDevice[] }>(
       `/proxy/network/api/s/${this.site}/stat/device`
     );
+    this.log(`Found ${data.data?.length || 0} devices`);
     return data.data || [];
   }
 
   async getClients(): Promise<LocalClient[]> {
+    this.log('Fetching clients...');
     const data = await this.request<{ data: LocalClient[] }>(
       `/proxy/network/api/s/${this.site}/stat/sta`
     );
+    this.log(`Found ${data.data?.length || 0} clients`);
     return data.data || [];
   }
 
   async getSiteSettings(): Promise<SiteSettings[]> {
+    this.log('Fetching site settings...');
     const data = await this.request<{ data: SiteSettings[] }>(
       `/proxy/network/api/s/${this.site}/rest/setting`
     );
@@ -123,6 +199,7 @@ export class UniFiLocalAPI {
   }
 
   async getWlanConfig(): Promise<any[]> {
+    this.log('Fetching WLAN config...');
     const data = await this.request<{ data: any[] }>(
       `/proxy/network/api/s/${this.site}/rest/wlanconf`
     );
@@ -130,6 +207,7 @@ export class UniFiLocalAPI {
   }
 
   async getFirewallRules(): Promise<any[]> {
+    this.log('Fetching firewall rules...');
     const data = await this.request<{ data: any[] }>(
       `/proxy/network/api/s/${this.site}/rest/firewallrule`
     );
@@ -152,6 +230,7 @@ export class UniFiLocalAPI {
     };
 
     try {
+      this.log(`Enabling IPS in ${mode} mode...`);
       await this.request(`/proxy/network/api/s/${this.site}/rest/setting/ips`, {
         method: 'PUT',
         body: JSON.stringify({
@@ -169,6 +248,7 @@ export class UniFiLocalAPI {
         },
       };
     } catch (error) {
+      this.log('Enable IPS failed:', error);
       return {
         success: false,
         change,
@@ -178,6 +258,7 @@ export class UniFiLocalAPI {
   }
 
   async disableIPS(): Promise<void> {
+    this.log('Disabling IPS...');
     await this.request(`/proxy/network/api/s/${this.site}/rest/setting/ips`, {
       method: 'PUT',
       body: JSON.stringify({ enabled: false }),
@@ -186,9 +267,9 @@ export class UniFiLocalAPI {
 
   async updateDeviceRadioSettings(
     deviceId: string,
-    radio: 'ng' | 'na', // ng = 2.4GHz, na = 5GHz
+    radio: 'ng' | 'na',
     settings: {
-      txPower?: number; // 0-100 percentage
+      txPower?: number;
       channel?: number;
       channelWidth?: 20 | 40 | 80 | 160;
     }
@@ -204,6 +285,8 @@ export class UniFiLocalAPI {
     };
 
     try {
+      this.log(`Updating device ${deviceId} radio ${radio}...`, settings);
+      
       const payload: any = {};
       
       if (settings.txPower !== undefined) {
@@ -231,6 +314,7 @@ export class UniFiLocalAPI {
 
       return { success: true, change };
     } catch (error) {
+      this.log('Update radio settings failed:', error);
       return {
         success: false,
         change,
@@ -251,6 +335,7 @@ export class UniFiLocalAPI {
     };
 
     try {
+      this.log(`Enabling band steering for WLAN ${wlanId}...`);
       await this.request(
         `/proxy/network/api/s/${this.site}/rest/wlanconf/${wlanId}`,
         {
@@ -263,6 +348,7 @@ export class UniFiLocalAPI {
 
       return { success: true, change };
     } catch (error) {
+      this.log('Enable band steering failed:', error);
       return {
         success: false,
         change,
@@ -283,6 +369,7 @@ export class UniFiLocalAPI {
     };
 
     try {
+      this.log(`Enabling fast roaming for WLAN ${wlanId}...`);
       await this.request(
         `/proxy/network/api/s/${this.site}/rest/wlanconf/${wlanId}`,
         {
@@ -295,6 +382,7 @@ export class UniFiLocalAPI {
 
       return { success: true, change };
     } catch (error) {
+      this.log('Enable fast roaming failed:', error);
       return {
         success: false,
         change,
@@ -320,6 +408,7 @@ export class UniFiLocalAPI {
     };
 
     try {
+      this.log('Creating VLAN...', config);
       await this.request(
         `/proxy/network/api/s/${this.site}/rest/networkconf`,
         {
@@ -337,6 +426,7 @@ export class UniFiLocalAPI {
 
       return { success: true, change };
     } catch (error) {
+      this.log('Create VLAN failed:', error);
       return {
         success: false,
         change,
@@ -357,6 +447,7 @@ export class UniFiLocalAPI {
     };
 
     try {
+      this.log(`Rebooting device ${deviceId}...`);
       await this.request(
         `/proxy/network/api/s/${this.site}/cmd/devmgr`,
         {
@@ -370,6 +461,7 @@ export class UniFiLocalAPI {
 
       return { success: true, change };
     } catch (error) {
+      this.log('Reboot device failed:', error);
       return {
         success: false,
         change,
